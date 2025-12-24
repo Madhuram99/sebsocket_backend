@@ -8,10 +8,10 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from copilot_state import CopilotState
 
-# Initialize LLM with optimized settings for logic
+# Initialize LLM with optimized settings
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    temperature=0.1,  # Lower temperature for more reliable JSON output
+    model="gemini-2.5-flash",
+    temperature=0.1,  # Lower temperature is critical for reliable JSON
     google_api_key=os.environ.get("GOOGLE_API_KEY")
 )
 
@@ -19,75 +19,48 @@ def clean_json_response(content: str) -> str:
     """Removes markdown code blocks like ```json ... ``` often added by LLMs"""
     return re.sub(r"```json|```", "", content).strip()
 
-# --- Enhanced Agent Logic ---
-
 async def intent_router(state: CopilotState) -> CopilotState:
-    """
-    Uses full conversation history to classify user intent accurately
-    """
+    """Uses full history to classify intent, enabling follow-up context."""
     messages = state.get("messages", [])
     
     router_prompt = (
         "Classify the user's latest intent based on the conversation history. "
-        "Categories: 'greeting', 'modify' (changing values/sliders), "
-        "'explain' (asking why or how), 'scenario' (what-if analysis). "
+        "Categories: 'greeting', 'modify' (changing values), 'explain', 'scenario'. "
         "Return ONLY the category name."
     )
 
-    # Pass history to ensure the router understands follow-up context
-    history = []
-    for m in messages:
-        if m["role"] == "user":
-            history.append(HumanMessage(content=m["content"]))
-        else:
-            history.append(AIMessage(content=m["content"]))
-
+    history = [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"]) for m in messages]
     response = await llm.ainvoke([SystemMessage(content=router_prompt)] + history)
-
     state["current_intent"] = response.content.strip().lower()
-    state["agent_history"].append("router")
     return state
 
 async def calculator_controller(state: CopilotState) -> CopilotState:
-    """
-    Parses requests to modify the calculator (e.g., 'Reduce human fixed costs by 15%')
-    and generates JSON patches.
-    """
+    """Calculates absolute values from percentages and generates clean JSON patches."""
     calc_state = state.get("calculator_state", {})
-    last_user_msg = state["messages"][-1]["content"]
-
-    # Provide the LLM with the actual keys available in the calculator to prevent hallucinations
+    last_msg = state["messages"][-1]["content"]
     available_keys = list(calc_state.keys())
     
     controller_prompt = (
         f"You are a system controller. Current state keys: {available_keys}. "
-        "The user wants to change a value. If they use a percentage, calculate the new absolute value "
-        "based on the current state provided. "
-        "Output ONLY a raw JSON object of the fields to change. "
-        "Example: {'hSalary': 15000}. Do not include markdown or text."
+        "Calculate the new absolute value if the user uses percentages. "
+        "Output ONLY a raw JSON object of the fields to change. No markdown."
     )
 
     response = await llm.ainvoke([
         SystemMessage(content=controller_prompt),
-        HumanMessage(content=f"Current State: {json.dumps(calc_state)}\nRequest: {last_user_msg}")
+        HumanMessage(content=f"Current State: {json.dumps(calc_state)}\nRequest: {last_msg}")
     ])
 
     try:
-        # Clean and parse the JSON response
         clean_content = clean_json_response(response.content)
         updates = json.loads(clean_content)
-        
-        # In copilot_state.py, pending_actions is a List[Dict]
         state["pending_actions"] = [updates] 
-        state["messages"].append({"role": "assistant", "content": f"I've updated the calculator for you with these changes: {updates}"})
-    except (json.JSONDecodeError, Exception):
-        state["messages"].append({
-            "role": "assistant",
-            "content": "I understood you wanted to make a change, but I had trouble calculating the exact update."
-        })
-
-    state["agent_history"].append("controller")
+        state["messages"].append({"role": "assistant", "content": f"I have applied the updates: {updates}"})
+    except Exception:
+        state["messages"].append({"role": "assistant", "content": "I understood the request but failed to format the update correctly."})
     return state
+
+# ... (Continue with existing analyst_agent and other nodes)
 
 async def analyst_agent(state: CopilotState) -> CopilotState:
     """
