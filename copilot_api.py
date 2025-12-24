@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 import logging
 
@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     calculator_state: Dict[str, Any]
     session_id: str
     user_id: str
+    # Add history to the request model to receive previous messages from the frontend
+    history: Optional[List[Dict[str, str]]] = []
 
 class ChatResponse(BaseModel):
     message: str
@@ -64,8 +66,12 @@ async def chat_endpoint(request: ChatRequest):
     returning the model's reply and any calculator actions/artifacts.
     """
     try:
+        # Construct the full message list including history
+        all_messages = request.history if request.history else []
+        all_messages.append({"role": "user", "content": request.message})
+
         initial_state: CopilotState = {
-            "messages": [{"role": "user", "content": request.message}],
+            "messages": all_messages,  # Now includes the full history for interactivity
             "calculator_state": request.calculator_state,
             "session_id": request.session_id,
             "user_id": request.user_id,
@@ -79,8 +85,11 @@ async def chat_endpoint(request: ChatRequest):
 
         final_state = await graph_app.ainvoke(initial_state)
 
+        # Retrieve the assistant's latest message
+        assistant_message = final_state["messages"][-1]["content"]
+
         return ChatResponse(
-            message=str(final_state["messages"][-1]["content"]),
+            message=str(assistant_message),
             calculator_updates=final_state.get("pending_actions", []),
             artifacts=final_state.get("pending_artifacts", [])
         )
